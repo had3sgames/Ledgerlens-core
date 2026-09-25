@@ -9,6 +9,7 @@ cases, exit non-zero when a hard threshold is breached.
 | `benchmark_scoring.py` | p50/p95/p99 latency of the scoring pipeline, with regression detection against a committed baseline | Helper functions only (see below) |
 | `benchmark_feature_engineering.py` | Numba JIT vs pure-Python speed of the `feature_engineering.py` hot loops | No — local only |
 | `horizon_checkpoint.py` | Cursor-checkpoint flush latency under a 10 000-event replay | No — local only |
+| `benchmark_horizon_pool.py` | Pooled/HTTP/2 vs. per-request Horizon connections: latency, throughput, reuse rate (target >= 0.95) | No — needs network |
 
 All three assume the project is installed (`pip install -e .` plus the test
 requirements) and are run from the repository root.

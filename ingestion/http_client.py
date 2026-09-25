@@ -51,6 +51,13 @@ from datetime import datetime, timezone
 
 import httpx
 
+try:  # HTTP/2 needs the optional ``h2`` package (``pip install httpx[http2]``).
+    import h2  # noqa: F401
+
+    _HTTP2_AVAILABLE = True
+except ImportError:  # pragma: no cover - depends on installed extras
+    _HTTP2_AVAILABLE = False
+
 from ingestion.metrics import _normalise_endpoint, get_metrics
 
 _metrics = get_metrics()
@@ -514,6 +521,9 @@ class AsyncHorizonClient:
         rate_limiter: "TokenBucketRateLimiter | None" = None,
         rate_limit_rps: float | None = None,
         rate_burst: float | None = None,
+        max_keepalive_connections: int | None = None,
+        keepalive_expiry: float = 60.0,
+        http2: bool | None = None,
     ) -> None:
         try:
             from config.settings import settings  # local import to avoid circular deps
@@ -522,7 +532,25 @@ class AsyncHorizonClient:
 
         self._base_url = base_url.rstrip("/")
         self._semaphore = asyncio.Semaphore(max_concurrency)
-        self._client = httpx.AsyncClient(timeout=30.0)
+        # Persistent pool sized to the concurrency cap so sustained polling
+        # never opens more sockets than it can use, and idle sockets survive
+        # between poll intervals.  HTTP/2 multiplexes requests over a single
+        # connection when Horizon negotiates it via ALPN; otherwise httpx
+        # transparently falls back to HTTP/1.1 keep-alive.
+        self._limits = httpx.Limits(
+            max_connections=max_concurrency,
+            max_keepalive_connections=(
+                max_keepalive_connections
+                if max_keepalive_connections is not None
+                else max_concurrency
+            ),
+            keepalive_expiry=keepalive_expiry,
+        )
+        self._client = httpx.AsyncClient(
+            timeout=30.0,
+            limits=self._limits,
+            http2=_HTTP2_AVAILABLE if http2 is None else http2,
+        )
         self.max_retries = max_retries if max_retries is not None else (
             settings.horizon_max_retries if settings is not None else 3
         )
@@ -593,8 +621,27 @@ class AsyncHorizonClient:
             When the ``X-Stellar-Horizon-Version`` header is present and
             outside the configured ``[min_version, max_version)`` range.
         """
+        opened = False
+
+        async def _trace(event_name: str, info: dict) -> None:
+            nonlocal opened
+            if event_name == "connection.connect_tcp.started":
+                opened = True
+
+        extensions = {**kwargs.pop("extensions", {}), "trace": _trace}
         async with self._semaphore:
-            response = await getattr(self._client, method.lower())(url, **kwargs)
+            try:
+                response = await getattr(self._client, method.lower())(
+                    url, extensions=extensions, **kwargs
+                )
+            except httpx.PoolTimeout:
+                _metrics.http_pool_exhaustion_total.inc()
+                logger.warning("Horizon connection pool exhausted for %s", url)
+                raise
+        if opened:
+            _metrics.http_connections_opened_total.inc()
+        else:
+            _metrics.http_connections_reused_total.inc()
         response.raise_for_status()
         if self._version_guard is not None:
             self._version_guard.check(response.headers, url)

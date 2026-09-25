@@ -141,6 +141,9 @@ class _NoOpCollector:
     http_request_duration_seconds = _NoOpMetric()
     http_rate_limit_hits_total = _NoOpMetric()
     http_retries_total = _NoOpMetric()
+    http_connections_opened_total = _NoOpMetric()
+    http_connections_reused_total = _NoOpMetric()
+    http_pool_exhaustion_total = _NoOpMetric()
     ledger_close_to_score_seconds = _NoOpMetric()
     dlq_entries_total = _NoOpMetric()
     dlq_depth = _NoOpMetric()
@@ -182,6 +185,12 @@ class IngestionMetricsCollector:
       - ``ledgerlens_http_rate_limit_hits_total`` — HTTP 429 responses.
       - ``ledgerlens_http_retries_total`` — retry attempts labelled by
         ``reason`` (``"5xx"``, ``"429"``, ``"timeout"``).
+      - ``ledgerlens_http_connections_opened_total`` /
+        ``ledgerlens_http_connections_reused_total`` — requests served on a
+        new vs. pooled connection.  Reuse rate is
+        ``reused / (reused + opened)``; target is >= 0.95 under sustained polling.
+      - ``ledgerlens_http_pool_exhaustion_total`` — requests that timed out
+        waiting for a free pooled connection (alert on any sustained rate).
 
     **Pipeline latency**
       - ``ledgerlens_ledger_close_to_score_seconds`` — end-to-end latency from
@@ -263,6 +272,18 @@ class IngestionMetricsCollector:
             "ledgerlens_http_retries_total",
             "Total retry attempts for failed HTTP requests",
             ["reason"],
+        )
+        self.http_connections_opened_total = Counter(
+            "ledgerlens_http_connections_opened_total",
+            "Horizon requests that required opening a new TCP connection",
+        )
+        self.http_connections_reused_total = Counter(
+            "ledgerlens_http_connections_reused_total",
+            "Horizon requests served on an existing pooled connection",
+        )
+        self.http_pool_exhaustion_total = Counter(
+            "ledgerlens_http_pool_exhaustion_total",
+            "Horizon requests that timed out waiting for a pooled connection",
         )
 
         # ── Pipeline latency ──────────────────────────────────────────────
